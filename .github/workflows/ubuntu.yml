@@ -1,0 +1,96 @@
+name: Ubuntu VDS
+
+on: workflow_dispatch
+
+jobs:
+  vds:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        instance: [1, 2, 3, 4, 5]  # 5 farklı instance oluştur
+    name: VDS Instance ${{ matrix.instance }}
+    timeout-minutes: 360
+    
+    steps:
+    - name: Tmate ve Gerekli Araçların Kurulumu
+      run: |
+        sudo rm /var/lib/dpkg/lock*
+        sudo dpkg --configure -a
+        sudo apt-get update -y
+        sudo apt-get install -y tmate curl jq parallel tor proxychains
+        
+    - name: Tor Servisini Başlat
+      run: |
+        sudo service tor start
+        sleep 5
+        
+    - name: VDS'leri Başlat
+      run: |
+        SECONDS=0
+        INSTANCE_ID=${{ matrix.instance }}
+        
+        for ID in {1..100}; do
+          SOCKET="/tmp/tmate_${INSTANCE_ID}_${ID}.sock"
+          
+          # Her oturum için yeni bir Tor bağlantısı kullan
+          NEW_IP=$(curl --socks5 localhost:9050 -s http://checkip.amazonaws.com)
+          echo "🌍 Yeni IP Adresi: $NEW_IP"
+          
+          proxychains tmate -S $SOCKET new-session -d
+          proxychains tmate -S $SOCKET wait tmate-ready
+          
+          # SSH kodunu al
+          FULL_SSH=$(proxychains tmate -S $SOCKET display -p '#{tmate_ssh}')
+          SSH_CODE=$(echo "$FULL_SSH" | cut -d' ' -f2)
+          
+          # Discord'a bildirim gönder
+          MSG=$(echo "**VDS #${INSTANCE_ID}-${ID}**\nIP: $NEW_IP\n\`\`\`$SSH_CODE\`\`\`" | jq -Rsa .)
+          JSON_DATA="{\"content\": $MSG}"
+          
+          curl -H "Content-Type: application/json" \
+            -d "$JSON_DATA" \
+            "https://discord.com/api/webhooks/1333833119127703644/1B0Q-p5qz2go84Ek4FQl73lxVmp2Z6EMEOrredaJ9YA2jySr_akf6w-AeYxV-i0BS5uN"
+          
+          echo "🖥️ VDS #${INSTANCE_ID}-${ID} Kod: $SSH_CODE (IP: $NEW_IP)"
+          
+          # Arka plan izleme
+          (
+            SECONDS=0
+            while true; do
+              sleep 300
+              
+              # IP'yi yenile
+              sudo service tor reload
+              NEW_IP=$(curl --socks5 localhost:9050 -s http://checkip.amazonaws.com)
+              
+              FULL_SSH=$(proxychains tmate -S $SOCKET display -p '#{tmate_ssh}' || echo "Yenileniyor...")
+              SSH_CODE=$(echo "$FULL_SSH" | cut -d' ' -f2)
+              echo "🔄 VDS #${INSTANCE_ID}-${ID}: $SSH_CODE (IP: $NEW_IP)"
+              
+              # Saatlik bildirim
+              if [ $((SECONDS % 3600)) -lt 300 ]; then
+                UPDATE_MSG=$(echo "**VDS #${INSTANCE_ID}-${ID} - Yenilendi**\nIP: $NEW_IP\n\`\`\`$SSH_CODE\`\`\`" | jq -Rsa .)
+                JSON_DATA="{\"content\": $UPDATE_MSG}"
+                
+                curl -H "Content-Type: application/json" \
+                  -d "$JSON_DATA" \
+                  "https://discord.com/api/webhooks/1333833119127703644/1B0Q-p5qz2go84Ek4FQl73lxVmp2Z6EMEOrredaJ9YA2jySr_akf6w-AeYxV-i0BS5uN"
+              fi
+            done
+          ) &
+          
+          sleep 10
+          
+          # Her 20 VDS'de bir IP'yi yenile
+          if [ $((ID % 20)) -eq 0 ]; then
+            sudo service tor reload
+            sleep 5
+          fi
+        done
+        
+        while true; do
+          sleep 60
+          echo "🔍 Aktif VDS'ler - Instance $INSTANCE_ID ($(date)):"
+          ps aux | grep "tmate_${INSTANCE_ID}" | grep -v grep
+        done
